@@ -2,7 +2,7 @@ run:
 	@uvicorn workout_api.main:app --reload
 
 create_migrations:
-	@PYTHONPATH=$PYTHONPATH:${pwd} alembic revision --autogenerate -m $(d)
+	alembic revision --autogenerate
 
 run-migrations:
-	@PYTHONPATH=$PYTHONPATH:${pwd} alembic upgrade head
+	alembic upgrade head
