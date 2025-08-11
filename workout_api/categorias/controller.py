@@ -1,11 +1,15 @@
+from typing import Optional
 from uuid import uuid4
-from fastapi import APIRouter, Body, status, HTTPException
+from fastapi import APIRouter, Body, Depends, status, HTTPException
 from pydantic import UUID4
 
+from fastapi_pagination import LimitOffsetPage, Page, LimitOffsetParams
+from fastapi_pagination.ext.sqlalchemy import paginate
 from workout_api.categorias.schemas import CategoriaIn, CategoriaOut
 from workout_api.contrib.dependencies import DatabaseDependency
 from workout_api.categorias.models import CategoriaModel
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 
 router = APIRouter()
@@ -23,8 +27,20 @@ async def post(
     categoria_out = CategoriaOut(id=uuid4(), **categoria_in.model_dump())
     categoria_model = CategoriaModel(**categoria_out.model_dump())
     
-    db_session.add(categoria_model)
-    await db_session.commit()
+    try:
+        db_session.add(categoria_model)
+        await db_session.commit()
+    except IntegrityError:
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail="Categoria já existente no banco de dados"
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f"Erro ao inserir os dados no banco de dados: {Exception}"
+        )
+        
     return categoria_out
 
 
@@ -32,11 +48,12 @@ async def post(
     "/",
     summary="Consulta todas as categorias",
     status_code=status.HTTP_200_OK,
-    response_model=list[CategoriaOut]
+    response_model=LimitOffsetPage[CategoriaOut],
 )
-async def query(db_session: DatabaseDependency) -> list[CategoriaOut]:
-    categorias: list[CategoriaOut] = (await db_session.execute(select(CategoriaModel))).scalars().all()
-    return categorias
+async def query(db_session: DatabaseDependency, params: LimitOffsetParams = Depends()) -> list[CategoriaOut]:
+    resultado = (await paginate(db_session, select(CategoriaModel), params=params))
+    categorias = [CategoriaOut.model_validate(r, from_attributes=True) for r in resultado.items]
+    return LimitOffsetPage.create(items=categorias, total=resultado.total, params=params)
 
 
 @router.get(

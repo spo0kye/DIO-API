@@ -1,12 +1,13 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi_pagination import LimitOffsetPage, Page, LimitOffsetParams
 from fastapi_pagination.ext.sqlalchemy import paginate
 from pydantic import UUID4
-from sqlalchemy import join, select, delete
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload, load_only
+from sqlalchemy.orm import selectinload
 
 from workout_api.atleta.models import AtletaModel
 from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate, AtletaFiltrado
@@ -55,48 +56,60 @@ async def post(
             status_code=status.HTTP_303_SEE_OTHER,
             detail=f"Já existe um atleta cadastrado com o CPF {atleta_model.cpf}"
         )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ocorreu um erro ao inserir os dados no banco de dados: {Exception}"
+        )
+    
     return atleta_out
 
 @router.get(
     "/get_all",
     summary="Consultar todos os atletas",
     status_code=status.HTTP_200_OK,
-    response_model=list,
+    response_model=LimitOffsetPage,
 )
 async def get_all_atletas(
     db_session: DatabaseDependency,
     nome: Optional[bool] = False,
     categoria: Optional[bool] = False,
-    centro_treinamento: Optional[bool] = False
-) -> list[AtletaFiltrado]:
+    centro_treinamento: Optional[bool] = False,
+    params: LimitOffsetParams = Depends()
+) -> LimitOffsetPage:
     if not nome and not categoria and not centro_treinamento:
-        atletas_orm = (await db_session.execute(
+        pesquisa = (
             select(AtletaModel)
             .options(selectinload(AtletaModel.categoria), selectinload(AtletaModel.centro_treinamento))
-        )).scalars().all()
-        if not atletas_orm:
+        )
+        
+        resultado = await paginate(db_session, pesquisa, params)
+        if not resultado:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"A lista de atletas está vazia"
             )
-        atletas = [AtletaOut.model_validate(a, from_attributes=True) for a in atletas_orm]
-        return atletas
+        atletas = [AtletaOut.model_validate(a, from_attributes=True) for a in resultado.items]
+        return LimitOffsetPage.create(items=atletas, total=resultado.total, params=params)
     
     else:
-        colunas = []
+        colunas = [AtletaModel.cpf]
         colunas.append(AtletaModel.nome) if nome else None
-        colunas.append(CategoriaModel.nome.label("Nome_categoria")) if categoria else None
-        colunas.append(CentroTreinamentoModel.nome.label("Nome_centro")) if centro_treinamento else None
+        colunas.append(CategoriaModel.nome.label("categoria")) if categoria else None
+        colunas.append(CentroTreinamentoModel.nome.label("centro_treinamento")) if centro_treinamento else None
         
         cmd = select(*colunas)
         cmd = cmd.join(AtletaModel.categoria) if categoria else cmd
         cmd = cmd.join(AtletaModel.centro_treinamento) if centro_treinamento else cmd
         
-        result = await db_session.execute(cmd)
-        rows = result.all()
-    
-        # Retorna lista de dicionários
-        return [dict(row._mapping) for row in rows]
+        resultado = await paginate(db_session, cmd, params=params)
+        atletas = []
+        for row in resultado.items:
+            d = dict(row._mapping)
+            d.pop("cpf")
+            atletas.append(d)
+            
+        return LimitOffsetPage.create(items=atletas, total=resultado.total, params=params)
     
 
 @router.get(
