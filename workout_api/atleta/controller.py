@@ -1,12 +1,15 @@
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
+from fastapi_pagination.ext.sqlalchemy import paginate
 from pydantic import UUID4
-from sqlalchemy import select, delete
-from sqlalchemy.orm import selectinload
+from sqlalchemy import join, select, delete
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload, load_only
 
 from workout_api.atleta.models import AtletaModel
-from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
+from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate, AtletaFiltrado
 from workout_api.categorias.models import CategoriaModel
 from workout_api.centro_treinamento.models import CentroTreinamentoModel
 from workout_api.contrib.dependencies import DatabaseDependency
@@ -47,38 +50,80 @@ async def post(
     try:
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
+    except IntegrityError:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Um erro ocorreu ao inserir os dados no banco de dados"
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f"Já existe um atleta cadastrado com o CPF {atleta_model.cpf}"
         )
     return atleta_out
 
 @router.get(
-    "/",
+    "/get_all",
     summary="Consultar todos os atletas",
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut]
+    response_model=list,
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel).options(selectinload(AtletaModel.categoria)))).scalars().all()
-    lista = [AtletaOut.model_validate(atleta, from_attributes=True) for atleta in atletas]
-    if not lista:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"A lista de atletas está vazia"
-        )
-    return lista
+async def get_all_atletas(
+    db_session: DatabaseDependency,
+    nome: Optional[bool] = False,
+    categoria: Optional[bool] = False,
+    centro_treinamento: Optional[bool] = False
+) -> list[AtletaFiltrado]:
+    if not nome and not categoria and not centro_treinamento:
+        atletas_orm = (await db_session.execute(
+            select(AtletaModel)
+            .options(selectinload(AtletaModel.categoria), selectinload(AtletaModel.centro_treinamento))
+        )).scalars().all()
+        if not atletas_orm:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"A lista de atletas está vazia"
+            )
+        atletas = [AtletaOut.model_validate(a, from_attributes=True) for a in atletas_orm]
+        return atletas
+    
+    else:
+        colunas = []
+        colunas.append(AtletaModel.nome) if nome else None
+        colunas.append(CategoriaModel.nome.label("Nome_categoria")) if categoria else None
+        colunas.append(CentroTreinamentoModel.nome.label("Nome_centro")) if centro_treinamento else None
+        
+        cmd = select(*colunas)
+        cmd = cmd.join(AtletaModel.categoria) if categoria else cmd
+        cmd = cmd.join(AtletaModel.centro_treinamento) if centro_treinamento else cmd
+        
+        result = await db_session.execute(cmd)
+        rows = result.all()
+    
+        # Retorna lista de dicionários
+        return [dict(row._mapping) for row in rows]
+    
 
 @router.get(
-    "/{id}",
-    summary="Consultar atleta pelo ID",
+    "/",
+    summary="Consultar atletas pelo ID, nome ou CPF",
     status_code=status.HTTP_200_OK,
-    response_model=AtletaOut,
+    response_model=list[AtletaOut],
 )
-async def query(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
-    atleta = (await db_session.execute(select(AtletaModel).filter_by(id=id))).scalars().first()
-    return atleta
+async def query(
+    db_session: DatabaseDependency,
+    id: Optional[UUID4] = Query(None),
+    nome: Optional[str] = Query(None),
+    cpf: Optional[str] = Query(None)
+) -> list[AtletaOut]:
+    if id == None and nome == None and cpf == None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Não foi informado nenhum ID, nome ou CPF para a consulta"
+        )
+    
+    params = {}
+    if id is not None: params["id"] = id
+    if nome is not None: params["nome"] = nome
+    if cpf is not None: params["cpf"] = cpf
+    
+    atletas = (await db_session.execute(select(AtletaModel).filter_by(**params))).scalars().all()
+    return atletas
 
 
 @router.patch(
